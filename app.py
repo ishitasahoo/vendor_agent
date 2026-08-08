@@ -4,6 +4,10 @@ import json
 import time
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+from anthropic import Anthropic
+
+load_dotenv()
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -241,49 +245,73 @@ if "last_query" not in st.session_state:
 
 # ── Helper: call Layer 2 (stub — replace with real agent call) ──────────────────
 def run_agent(mode, goal, location, date_range=None, radius=None):
-    """
-    Stub that simulates Layer 2 returning structured results.
-    Replace the body of this function with your real Claude API agent call.
-    Returns a list of dicts matching the expected schema.
-    """
-    time.sleep(2.5)  # simulate network latency
+    import anthropic
+
+    import os
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     if mode == "events":
-        return [
-            {"Event name": "Boston Vegan Fest", "Date": "2026-06-14", "Type": "Vegan festival",
-             "Booth cost ($)": 175, "Deadline": "2026-05-01", "Location": "Boston, MA",
-             "Contact": "vendors@bostonveganfest.org", "Website": "bostonveganfest.org", "Notes": "—"},
-            {"Event name": "New England Holistic Expo", "Date": "2026-07-20", "Type": "Wellness expo",
-             "Booth cost ($)": "—", "Deadline": "—", "Location": "Worcester, MA",
-             "Contact": "info@neholisticexpo.com", "Website": "neholisticexpo.com", "Notes": "Indoor only"},
-            {"Event name": "Cape Cod Wellness Fair", "Date": "2026-08-08", "Type": "Cultural fair",
-             "Booth cost ($)": 200, "Deadline": "2026-06-30", "Location": "Hyannis, MA",
-             "Contact": "info@ccwf.org", "Website": "ccwf.org", "Notes": "Outdoor, tents provided"},
-            {"Event name": "Providence Plant & Herb Fest", "Date": "2026-09-12", "Type": "Vegan festival",
-             "Booth cost ($)": 150, "Deadline": "2026-07-15", "Location": "Providence, RI",
-             "Contact": "vendors@pvdfest.com", "Website": "pvdfest.com", "Notes": "—"},
-            {"Event name": "Hartford Multicultural Market", "Date": "2026-10-03", "Type": "Cultural fair",
-             "Booth cost ($)": 120, "Deadline": "2026-08-01", "Location": "Hartford, CT",
-             "Contact": "market@hartfordcultural.org", "Website": "hartfordcultural.org", "Notes": "—"},
-        ]
+        date_hint = f" between {date_range[0]} and {date_range[1]}" if date_range and date_range[0] else ""
+        user_msg = (
+            f"Search the web and find vendor/exhibitor booth opportunities for: {goal}. "
+            f"Location: {location}{date_hint}. "
+            f"Run no more than 3 searches. Find 5-8 real events."
+        )
+        fields = "Event name, Date, Type, Booth cost ($), Deadline, Location, Contact Email, Phone, Website, Notes"
     else:
-        return [
-            {"Store name": "Harvest Moon Natural Foods", "Address": "142 Cambridge St, Boston, MA 02114",
-             "Type": "New age", "Sub-type": "Health & wellness", "Phone": "(617) 555-0182",
-             "Website": "harvestmoonboston.com", "Notes": "Accepts local consignment"},
-            {"Store name": "Patel Brothers", "Address": "945 Moody St, Waltham, MA 02453",
-             "Type": "Ethnic grocery", "Sub-type": "South Asian", "Phone": "(781) 555-0247",
-             "Website": "patelbros.com", "Notes": "Large chain, contact district buyer"},
-            {"Store name": "The Crystal Garden", "Address": "78 Main St, Northampton, MA 01060",
-             "Type": "New age", "Sub-type": "Metaphysical / crystal", "Phone": "(413) 555-0391",
-             "Website": "thecrystalgarden.com", "Notes": "Small, owner-operated"},
-            {"Store name": "Caribbean Spice Market", "Address": "230 Blue Hill Ave, Dorchester, MA 02121",
-             "Type": "Ethnic grocery", "Sub-type": "Caribbean", "Phone": "(617) 555-0518",
-             "Website": "—", "Notes": "Walk-in preferred for new vendors"},
-            {"Store name": "Lotus Root Ayurveda", "Address": "55 Porter Rd, Cambridge, MA 02140",
-             "Type": "New age", "Sub-type": "Ayurvedic / herbal", "Phone": "(617) 555-0674",
-             "Website": "lotusrootcambridge.com", "Notes": "Looking for herbal products"},
-        ]
+        user_msg = (
+            f"Search the web and find retail stores matching: {goal}. "
+            f"Location: {location}. "
+            f"Run no more than 3 searches. Find 5-8 real stores."
+        )
+        fields = "Store name, Address, Type, Sub-type, Phone, Website, Notes"
+
+    # Step 1: let Claude search the web
+    search_response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2000,
+        system="You are a research assistant. Search the web and summarise what you find in plain text. Do not output JSON yet.",
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": user_msg}]
+    )
+
+    search_text = " ".join(
+        block.text for block in search_response.content
+        if hasattr(block, "text")
+    )
+
+    if not search_text.strip():
+        st.error("No results found. Try a different search.")
+        return []
+
+    # Step 2: ask Claude to format the findings as JSON
+    format_response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2000,
+        system="You are a data formatter. Convert the provided text into a JSON array. Return a raw JSON array only — no markdown, no explanation, no code fences.",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Convert this into a JSON array. Each item must have these exact keys: {fields}. "
+                f"Use — for missing values. Here is the data:\n\n{search_text}"
+            )
+        }]
+    )
+
+    raw = " ".join(
+        block.text for block in format_response.content
+        if hasattr(block, "text")
+    )
+
+    clean = raw.strip().strip("```json").strip("```").strip()
+
+    if not clean:
+        st.error("Couldn't format results. Please try again.")
+        return []
+
+    return json.loads(clean)
 
 # ── Google Sheets sync (Layer 5) ───────────────────────────────────────────────
 def sync_to_sheets(df, is_events):
@@ -398,7 +426,7 @@ with left_col:
 
         tip_text = "💡 Be specific about event types and your geography to get the most relevant results."
         fields_label = "Fields extracted per event:"
-        fields = ["Event name", "Date", "Type", "Booth cost", "Deadline", "Location", "Contact", "Website"]
+        fields = ["Event name", "Date", "Type", "Booth cost", "Deadline", "Location", "Contact Email", "Phone", "Website"]
     else:
         st.markdown("##### Find stores and retailers")
         goal = st.text_area(
